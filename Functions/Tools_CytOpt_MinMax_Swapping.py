@@ -1,119 +1,64 @@
 import numpy as np
 from scipy.special import logsumexp
+from scipy.stats import entropy
 
 
-def cost(X, y):
+def cost(X_s,y):
     """
-    Squared euclidean distance between y and the I points of X.
-    if y is the jth point of the support of the distribution,
-    the result is the jth column of the cost matrix.
-
+    Squared euclidean distance between y and the I points of X_s.
     """
-    diff = X-y
+    diff = X_s-y
     return(np.linalg.norm(diff, axis = 1)**2)
 
-
-def func_f(lbd, eps, X, Y, j, u, G):
-    """
-    Compute the function f inside the expectation at the point (y_j, u). 
-    """
-    
-    arg1 = (u - cost(X,Y[j]))/eps
-    t1 = logsumexp(arg1)
-    
-    arg2 = -(G.T).dot(u)/lbd
-    t2 = logsumexp(arg2)
-    
-    result = -eps*t1 -lbd*t2
-    
-    return(result)
-    
-
-def grad_f(lbd, eps, X, Y, j, u, G):
+def grad_f(lbd, eps, X_s, X_t, j, u, D):
     """
     Compute the gradient with respect to u of the function f inside the expectation
     """
-    arg1 = (u - cost(X,Y[j]))/eps
+    arg1 = (u - cost(X_s, X_t[j]))/eps
     cor1 = np.max(arg1)
     vec1 = np.exp(arg1-cor1)
     t1 = - vec1/np.sum(vec1)
 
-    arg2 = -(G.T).dot(u)/lbd
+    arg2 = -(D.T).dot(u)/lbd
     cor2 = np.max(arg2)
     vec2 = np.exp(arg2-cor2)
-    t2 = G.dot(vec2)/np.sum(vec2)
+    t2 = D.dot(vec2)/np.sum(vec2)
 
     return(t1+t2)
 
-def Gam_mat(Lab_source):
+def gammatrix(X_s, Lab_source):
     """
-    Compute the Gamma matrix that allows to pass from the class proportions to the weight vector
+    Computation of the operator D that maps the class proportions with the weights.
     """
-    if Lab_source.min() == 0:
-        K = int(Lab_source.max())+1
-        I = Lab_source.shape[0]
-        Gamma = np.zeros((I,K))
+    I = X_s.shape[0]
+    if min(Lab_source) == 0:
+        K = int(max(Lab_source))
+        D = np.zeros((I,K+1))
+        for k in range(K+1):
+            D[:,k] = 1/np.sum(Lab_source == k) * np.asarray(Lab_source == k, dtype=float)
 
-        for k in range(K):
-            Gamma[:,k] = 1/np.sum(Lab_source == k) * np.asarray(Lab_source == k, dtype=float)
+        h = np.ones(K+1)
 
-    
     else:
-        K = int(Lab_source.max())
-        I = Lab_source.shape[0]
-        Gamma = np.zeros((I,K))
-
+        K = int(max(Lab_source))
+        D = np.zeros((I,K))
         for k in range(K):
-            Gamma[:,k] = 1/np.sum(Lab_source == k+1) * np.asarray(Lab_source == k+1, dtype=float)
+            D[:,k] = 1/np.sum(Lab_source == k+1) * np.asarray(Lab_source == k+1, dtype=float)
 
-    return(Gamma)
+        h = np.ones(K)
+    return(D,h)
 
-def stomax(lbd, eps, X, Y, G, n_iter):
+def cytopt_minmax(X_s, X_t, Lab_source, eps=0.0001, lbd=0.0001, n_iter=4000,
+                  step=5, power=0.99, theta_true=0, monitoring=False):
     """
     Robbins-Monro algorithm to compute an approximate of the vector u^* solution of the maximization problem
-    """
-    I = X.shape[0]
-    J = Y.shape[0]
-    U = np.zeros(I)
-
-    #Step size policy
-    gamma = I*eps/1.9
-    c = 0.51
-
-    sample = np.random.choice(I, n_iter)
-
-    for n in range(n_iter):
-        idx = sample[n]
-        grd = grad_f(lbd, eps, X, Y, idx, U, G)
-        U = U + gamma/(n+1)**c * grd
-
-    return(U)
-
-def cytopt_minmax(lbd, eps, X, Y, Lab_source, n_iter):
-    """
-    The full new procedure to estimate the class proportions in the target data set
-    """
-    G = Gam_mat(Lab_source)
-    u_hat = stomax(lbd, eps, X, Y, G, n_iter)
-
-    # computation of the estimate of the class proportions
-
-    h_hat = np.exp(-(G.T).dot(u_hat)/lbd)
-    h_hat = h_hat/h_hat.sum()
-
-    return(h_hat)
-
-def cytopt_minmax_monitor(lbd, eps, X, Y, Lab_source, n_iter, h_true, step=0, power=0):
-    """
-    Robbins-Monro algorithm to compute an approximate of the vector u^* solution of the maximization problem
-    At each step, we evaluate the vector h_hat in order to study the convergence of this algorithm.
+    At each step, it is possible to evaluate the vector h_hat to study the convergence of this algorithm.
     """
     
-    I = X.shape[0]
-    J = Y.shape[0]
+    I = X_s.shape[0]
+    J = X_t.shape[0]
     U = np.zeros(I)
-    G = Gam_mat(Lab_source)
-
+    D = gammatrix(X_s, Lab_source)[0]
 
     #Step size policy
     if step == 0:
@@ -128,28 +73,30 @@ def cytopt_minmax_monitor(lbd, eps, X, Y, Lab_source, n_iter, h_true, step=0, po
 
     sample = np.random.choice(J, n_iter)
 
-    #Estimation of the expectation
-    W_storage = np.zeros(n_iter)
-    W_storage[0] = func_f(lbd, eps, X, Y, sample[0], U, G)
+    #Storage of the KL divergence between theta_hat and theta_true
+    KL_storage = np.zeros(n_iter)
 
-    #Computation of the Kullback
-    kullback_storage = np.zeros(n_iter)
+    for it in range(1,n_iter):
+        idx = sample[it]
+        grd = grad_f(lbd, eps, X_s, X_t, idx, U, D)
+        U = U + gamma/(it+1)**c * grd
 
-    for n in range(1,n_iter):
-        idx = sample[n]
-        grd = grad_f(lbd, eps, X, Y, idx, U, G)
-        U = U + gamma/(n+1)**c * grd
+        if monitoring == True:
+            
+            #Computation of the estimate h_hat
+            arg = -(D.T).dot(U)/lbd
+            M = np.max(arg)
 
-        W_storage[n] = n/(n+1) * W_storage[n-1] + 1/(n+1) * func_f(lbd, eps, X, Y, idx, U, G)
+            theta_hat = np.exp(arg-M)
+            theta_hat = theta_hat/theta_hat.sum()
+            if it%100 == 0:
+                print('Iteration ', it, ' - Curent theta_hat: \n', theta_hat)
+            KL_storage[it] = entropy(pk=theta_hat, qk=theta_true)
         
-        arg = -(G.T).dot(U)/lbd
+        arg = -(D.T).dot(U)/lbd
         M = np.max(arg)
-        
-        h_hat = np.exp(arg-M)
-        h_hat = h_hat/h_hat.sum()
 
-        Kull_current = np.sum(h_hat * np.log(h_hat/h_true))
-        kullback_storage[n] = Kull_current
-        #print(h_hat)
+        theta_hat = np.exp(arg-M)
+        theta_hat = theta_hat/theta_hat.sum()
 
-    return(h_hat, W_storage, kullback_storage)
+    return(theta_hat, KL_storage)

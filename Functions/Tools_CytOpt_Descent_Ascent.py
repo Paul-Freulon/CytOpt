@@ -1,95 +1,112 @@
 import numpy as np
 from scipy.special import logsumexp
+from scipy.stats import entropy
 
-
-def cost(X,y):
+def cost(X_s,y):
     """
-    Squared euclidean distance between y and the I points of X.
-    if y is the jth point of the support of the distribution,
-    the result is the jth column of the cost matrix.
-
+    Squared euclidean distance between y and the I points of X_s.
     """
-    diff = X-y
+    diff = X_s-y
     return(np.linalg.norm(diff, axis = 1)**2)
 
-
-def c_transform(f, X, Y, j, beta, eps=0.1):
-    """Calculate the c_transform of f in y_j"""
-    arg = (f - cost(X, Y[j]))/eps
-    return(eps*( np.log(beta[j])-logsumexp(arg)))
-
-
-def grad_heps(f, X, y, alpha, eps=0.1):
+def c_transform(f, X_s, X_t=None, j=None, beta=None, eps=0):
     """
-    Calculate the gradient of h_eps at (y,f)
+    Calculate the c_transform of f in the non regularized case if eps=0.
+    Otherwise, it computes the smooth c_transform with respect to the usual entropy.    
     """
-    arg = (f-cost(X,y))/eps
-    a = np.max(arg)
-    pi = np.exp(arg-a)
-    pi = pi/pi.sum()
-    return(alpha-pi)
-
-
-def h_eps(f, X, Y, j, alpha, beta, eps=0.1):
+    if eps==0:
+        cost_y = cost(X_s, X_t[j])
+        return(np.min(cost_y-f))
+    
+    else:
+        arg = (f - cost(X_s, X_t[j]))/eps
+        return(eps*( np.log(beta[j])-logsumexp(arg)))
+        
+    
+def grad_h(f, X_s, y, alpha, eps=0, entropy='product'):
     """
-    Calculate the function h_eps at (y_j, f) whose expectation we want to maximize.
+    This function calculates the gradient of the function that we aim to maximize.
+    The expectation of this function computed at a maximizer equals the wasserstein disctance,
+    or its regularized counterpart.
     """
-    return(np.sum(f*alpha)+c_transform(f,X,Y,j,beta,eps)-eps)
+    if eps == 0:
+        cost_y = cost(X_s,y)
+        i_star = np.argmin(cost_y - f)
+        to_return = alpha.copy()
+        to_return[i_star] = alpha[i_star] - 1
+        return(to_return)
+    
+    else:
+        arg = (f-cost(X_s,y))/eps
+        Mx = np.max(arg)
+        pi = np.exp(arg-Mx)
+        pi = pi/pi.sum()
+        return(alpha-pi)
 
-
-
-def Robbins_Monro_Algo(X, Y, alpha, beta, eps=0.1, n_iter=10000):
+def h_function(f, X_s, X_t=None, j=None, alpha=None, beta=None, eps=0):
     """
-    Function that calculate the approximation of the Wasserstein distance between alpha and beta
-    thanks to the Robbins-Monro Algorithm. X and Y are the supports of the source and target
-    distributions. alpha and beta are the weights of the distributions.
+    Calculate the function h whose expectation equals the semi-dual loss.
+    Maximizing the semi-dual loss allows us to compute the wasserstein distance.
     """
-    I = X.shape[0]
-    J = Y.shape[0]
+    if eps == 0:
+        return(np.sum(f*alpha)+c_transform(f,X_s, X_t=X_t[j]))
+    
+    else:
+        return(np.sum(f*alpha)+c_transform(f, X_s, X_t=X_t, j=j, beta=beta, eps=eps)-eps)
+               
 
-    #Definition of the step size policy
-    gamma = eps/(1.9 * min(beta))
+def Robbins_Wass(X_s, X_t, alpha, beta, eps=0, const=0.1, n_iter=10000, wloss=False):
+    """
+    Function that calculates the approximation of the Wasserstein distance between mu and nu
+    thanks to the Robbins-Monro Algorithm. X and Y are the supports of the source and target 
+    distribution. Alpha and beta are the weights of the distributions.
+    """    
+    I = X_s.shape[0]
+    J = X_t.shape[0]    
+    
+    alpha = alpha.ravel()
+    
+    #Step size policy.
+    if eps == 0:
+        gamma = 0.01/(4*np.min(alpha))
+    else:
+        gamma = eps/(1.9 * min(alpha))
     c = 0.51
+    
+    #Sampling with respect to the distribution beta.
+    sample = np.random.choice(a=np.arange(J), size=n_iter+1, p=beta.ravel())
+    
+    #Initialization of the dual vector f.
+    f = np.zeros(I)
 
-    # Storage of the estimates
-    W_hat_storage = np.zeros(n_iter)
-    Sigma_hat_storage = np.zeros(n_iter)
-    h_eps_storage = np.zeros(n_iter)
-    h_eps_square = np.zeros(n_iter)
-
-    # Sampling according to the target distribution.
-    sample = np.random.choice(a=np.arange(J), size=n_iter, p=beta)
-
-    # Initialisation of the dual vector f.
-    f = np.random.random(I)
-    f = f - np.mean(f)
-
+    #f_I vector:useful for the unregularized case.
+    F_I = 1/np.sqrt(I) * np.ones(I)
+    
+    
     # First iteration to start the loop.
-    W_hat_storage[0] = h_eps(f, X, Y, sample[0], alpha, beta, eps)
-    h_eps_storage[0] = h_eps(f, X, Y, sample[0], alpha, beta, eps)
-    h_eps_square[0] = h_eps(f, X, Y, sample[0], alpha, beta, eps)**2
-
-    #Robbins-Monro Algorithm.
-
-    for k in range(1,n_iter):
-
-        # Sample from the target measure.
-        j = sample[k]
-
-        # Update of f.
-        f = f + gamma/((k+1)**c) * grad_heps(f, X, Y[j,:], alpha, eps)
-        h_eps_storage[k] = h_eps(f, X, Y, j, alpha, beta, eps)
-
-        # Update of the estimator of the regularized Wasserstein distance.
-        W_hat_storage[k] = k/(k+1) * W_hat_storage[k-1] + 1/(k+1) * h_eps_storage[k]
-
-       
-        # Update of the estimator of the asymptotic variance
-        h_eps_square[k] = k/(k+1) * h_eps_square[k-1] + 1/(k+1) * h_eps_storage[k]**2
-        Sigma_hat_storage[k] = h_eps_square[k] - W_hat_storage[k]**2
-
-    L = [f, W_hat_storage, Sigma_hat_storage]
-    return(L)
+    W_hat_storage = np.zeros(n_iter+1)
+    W_hat_storage[0] = h_function(f, X_s, X_t, sample[0], alpha, beta, eps)
+    
+    for k in range(n_iter):
+    
+        #One sample of the beta distributions.
+        y = X_t[sample[k],:]
+    
+        #Computation of the gradient if eps>0 or subgradient if eps=0.
+        if eps == 0:
+            grad_temp = grad_h(f, X_s, y, alpha)
+            grad = (grad_temp - const * np.sum(f*F_I) * F_I)
+        else:
+            grad = grad_h(f, X_s, y, alpha, eps=eps)
+        
+        #Update of the dual variable
+        f = f + gamma/((k+1)**c) * grad
+        
+        if wloss==True:
+            # Update of the estimator of the regularized Wasserstein distance.
+            W_hat_storage[k+1] = k/(k+1) * W_hat_storage[k] + 1/(k+1) * h_function(f, X_s, X_t, sample[k+1], alpha, beta, eps)
+            
+    return([f, W_hat_storage[n_iter]])
 
 def Label_Prop_sto(L_source, f, X, Y, alpha, beta, eps):
     """
@@ -121,10 +138,12 @@ def Label_Prop_sto(L_source, f, X, Y, alpha, beta, eps):
     clustarget = np.argmax(L_target, axis = 0) + 1
     return([L_target, clustarget])
 
-
 def diff_simplex(h):
+    """
+    Computation of the Jacobian matrix of the softmax function.
+    """
     K = len(h)
-    Diff = np.zeros((K,K))
+    Diff = np.zeros((K,K), dtype=float)
     for i in range(K):
         for j in range(K):
             if i==j:
@@ -134,13 +153,11 @@ def diff_simplex(h):
 
     return (Diff)
 
-def cytopt_desas(n_it_grad, X, Lab_source, Y, n_it_sto, step_grad=1/1000, eps=1, cont=True):
+def gammatrix(X_s, Lab_source):
     """
-    Function that estimates the class proportions in the target data set. It solves the minimization problem with a gradient descent method. At each iteration, the gradient of W^{eps}(alpha, beta) is approximated thanks to the Robbins-Monro algorithm.
+    Computation of the operator D that maps the class proportions with the weights.
     """
-    # Definition of the operator D that links the class proportions and the weights.
-    I=X.shape[0]
-    J=Y.shape[0]
+    I = X_s.shape[0]
     if min(Lab_source) == 0:
         K = int(max(Lab_source))
         D = np.zeros((I,K+1))
@@ -156,78 +173,44 @@ def cytopt_desas(n_it_grad, X, Lab_source, Y, n_it_sto, step_grad=1/1000, eps=1,
             D[:,k] = 1/np.sum(Lab_source == k+1) * np.asarray(Lab_source == k+1, dtype=float)
 
         h = np.ones(K)
+    return(D,h)
 
-    #Weights of the target distribution
-    beta = 1/J * np.ones(J)
-
-    # Descent-Ascent procedure
-    for i in range(n_it_grad):
-        prop_classes = np.exp(h)
-        prop_classes = prop_classes/np.sum(prop_classes)
-        Dif = diff_simplex(h)
-        alpha_mod = D.dot(prop_classes)
-        f_star_hat = Robbins_Monro_Algo(X, Y, alpha_mod, beta, eps=eps,n_iter=n_it_sto)[0]
-        h = h - step_grad*((D.dot(Dif)).T).dot(f_star_hat)
-        prop_classes_new = np.exp(h)
-        prop_classes_new = prop_classes_new/np.sum(prop_classes_new)
-        if i%1000 == 0:
-            if cont == True:
-                print('Iteration ', i)
-                print('Curent h_hat')
-                print(prop_classes_new)
-
-    return(prop_classes_new)
-
-
-
-def cytopt_desas_monitor(n_it_grad, X, Lab_source, Y, n_it_sto, h_true, step_grad=1/1000, eps=1, cont=True):
+def cytopt_desasc(X_s, X_t, Lab_source, eps=0.0001, n_out=4000, n_stoc=10, step_grad=50, const=0.1, theta_true=0,
+                 monitoring=False):
     """
-    Function that estimates the class proportions in the target data set. It solves the JCPOT minimization problem with a gradient descent method. At each iteration, the gradient of W^{eps}(alpha, beta) is approximated thanks to the Robbins-Monro algorithm. In this algorithm we have the possibility to monitor the evolution of the Kullback divergence between the estimated proportions the benckmark proportions.
-    """    
+    Function that estimates the class proportions in the target data set. 
+    It solves the minimization problem with a gradient descent method. 
+    At each iteration, a (sub)gradient of W^{eps}(alpha, beta) is approximated with stochastic optimization 
+    Techniques.
+    """
     
-    # Definition of the operator D that links the class proportions and the weights.
-    I=X.shape[0]
-    J=Y.shape[0]
-    if min(Lab_source) == 0:
-        K = int(max(Lab_source))
-        D = np.zeros((I,K+1))
-        for k in range(K+1):
-            D[:,k] = 1/np.sum(Lab_source == k) * np.asarray(Lab_source == k, dtype=float)
+    print('\n Epsilon: ', eps)    
+    I, J=X_s.shape[0], X_t.shape[0]
 
-        h = np.ones(K+1)
-
-    else:
-        K = int(max(Lab_source))
-        D = np.zeros((I,K))
-        for k in range(K):
-            D[:,k] = 1/np.sum(Lab_source == k+1) * np.asarray(Lab_source == k+1, dtype=float)
-
-        h = np.ones(K)
-
+    # Definition of the operator D that maps the class proportions with the weights.
+    D,h = gammatrix(X_s, Lab_source)
+    
     #Weights of the target distribution
     beta = 1/J * np.ones(J)
+    
+    #Storage of the KL between theta_hat and theta_true
+    KL_Storage = np.zeros(n_out)
 
-    #Storage of the KL divergence at each iteration
-    KL_storage = np.zeros(n_it_grad)
-
-    # Descent-Ascent procedure
-    for i in range(n_it_grad):
-        prop_classes = np.exp(h)
-        prop_classes = prop_classes/np.sum(prop_classes)
+    for it in range(n_out):
+        prop_classes = np.exp(h)/np.sum(np.exp(h))
         Dif = diff_simplex(h)
         alpha_mod = D.dot(prop_classes)
-        f_star_hat = Robbins_Monro_Algo(X, Y, alpha_mod, beta, eps=eps,n_iter=n_it_sto)[0]
-        h = h - step_grad*((D.dot(Dif)).T).dot(f_star_hat)
-        prop_classes_new = np.exp(h)
-        prop_classes_new = prop_classes_new/np.sum(prop_classes_new)
-        if i%1000 == 0:
-            if cont == True:
-                print('Iteration ', i)
-                print('Curent h_hat')
-                print(prop_classes_new)
-        Kull_current = np.sum(prop_classes_new * np.log(prop_classes_new/h_true))
-        KL_storage[i] = Kull_current
+        
+        #Computation of the gradient:
+        grad = Robbins_Wass(X_s, X_t, alpha_mod, beta, eps=eps, const=const, n_iter=n_stoc)[0]
+        h = h - step_grad*(np.transpose(D.dot(Dif))).dot(grad)
+        prop_classes_new = np.exp(h)/np.sum(np.exp(h))
+        
+        if it%100 == 0:
+            print('Iteration ', it, ' - Curent h_hat: \n', prop_classes_new)
+        
+        if monitoring==True:
+            KL_Loss = entropy(pk=prop_classes_new, qk=theta_true)
+            KL_Storage[it] = KL_Loss
 
-
-    # Class proportions and Kullback-Leibler divergence
-    return(prop_classes_new, KL_storage)
+    return[prop_classes_new, KL_Storage]
